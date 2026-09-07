@@ -12,39 +12,30 @@ namespace TokenPay.BgServices
 {
     public class OrderCheckEVMERC20Service : BaseScheduledService
     {
-        private readonly ILogger<OrderCheckEVMERC20Service> _logger;
         private readonly IConfiguration _configuration;
         private readonly IHostEnvironment _env;
         private readonly List<EVMChain> _chains;
         private readonly Channel<TokenOrders> _channel;
-        private readonly IServiceProvider _serviceProvider;
-        private readonly FlurlClient client;
-
+        private readonly IFreeSql freeSql;
+        private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
+        private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
         public OrderCheckEVMERC20Service(ILogger<OrderCheckEVMERC20Service> logger,
             IConfiguration configuration,
             IHostEnvironment env,
             List<EVMChain> Chains,
             Channel<TokenOrders> channel,
-            IServiceProvider serviceProvider) : base("ERC20订单检测", TimeSpan.FromSeconds(15), logger)
+            IFreeSql freeSql) : base("EVM代币订单检测", TimeSpan.FromSeconds(15), logger)
         {
-            _logger = logger;
             this._configuration = configuration;
             this._env = env;
             _chains = Chains;
             this._channel = channel;
-            _serviceProvider = serviceProvider;
-            var WebProxy = configuration.GetValue<string>("WebProxy");
-            client = new FlurlClient();
-            if (!string.IsNullOrEmpty(WebProxy))
-            {
-                client.Settings.HttpClientFactory = new ProxyHttpClientFactory(WebProxy);
-            }
+            this.freeSql = freeSql;
         }
 
-        protected override async Task ExecuteAsync()
+        protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
         {
-            using IServiceScope scope = _serviceProvider.CreateScope();
-            var _repository = scope.ServiceProvider.GetRequiredService<IBaseRepository<TokenOrders>>();
+            var _repository = freeSql.GetRepository<TokenOrders>();
             foreach (var chain in _chains)
             {
                 if (chain == null || !chain.Enable || chain.ERC20 == null) continue;
@@ -53,7 +44,7 @@ namespace TokenPay.BgServices
                     var Currency = $"EVM_{chain.ChainNameEN}_{erc20.Name}_{chain.ERC20Name}";
                     try
                     {
-                        await ERC20(_repository, Currency, chain, erc20);
+                        await ERC20(_repository, Currency, chain, erc20, stoppingToken);
                     }
                     catch (Exception e)
                     {
@@ -68,7 +59,7 @@ namespace TokenPay.BgServices
         /// 查询交易记录
         /// </summary>
         /// <returns></returns>
-        private async Task ERC20(IBaseRepository<TokenOrders> _repository, string Currency, EVMChain chain, EVMErc20 erc20)
+        private async Task ERC20(IBaseRepository<TokenOrders> _repository, string Currency, EVMChain chain, EVMErc20 erc20, CancellationToken stoppingToken)
         {
             var Address = await _repository
                 .Where(x => x.Status == OrderStatus.Pending)
@@ -76,7 +67,7 @@ namespace TokenPay.BgServices
                 .Distinct()
                 .ToListAsync(x => x.ToAddress);
 
-            var BaseUrl = chain.ApiHost;
+            var BaseUrl = chain.ApiHost ?? "https://api.etherscan.io/v2/";
 
             foreach (var address in Address)
             {
@@ -93,6 +84,7 @@ namespace TokenPay.BgServices
                 }
                 var query = new Dictionary<string, object>
                 {
+                    { "chainid", chain.ChainId },
                     { "module", "account" },
                     { "action", "tokentx" },
                     { "contractaddress", erc20.ContractAddress },
@@ -107,10 +99,9 @@ namespace TokenPay.BgServices
                 var req = BaseUrl
                     .AppendPathSegment($"api")
                     .SetQueryParams(query)
-                    .WithClient(client)
                     .WithTimeout(15);
                 var result = await req
-                    .GetJsonAsync<BaseResponse<ERC20Transaction>>();
+                    .GetJsonAsync<BaseResponseList<ERC20Transaction>>(cancellationToken: stoppingToken);
 
                 if (result.Status == "1" && result.Result?.Count > 0)
                 {
@@ -134,23 +125,60 @@ namespace TokenPay.BgServices
                         var order = orders.Where(x => x.Amount == item.RealAmount && x.ToAddress.ToLower() == item.To.ToLower() && x.CreateTime < item.DateTime)
                             .OrderByDescending(x => x.CreateTime)//优先付最后一单
                             .FirstOrDefault();
+                    recheck:
                         if (order != null)
                         {
                             order.FromAddress = item.From;
                             order.BlockTransactionId = item.Hash;
                             order.Status = OrderStatus.Paid;
-                            order.PayTime = DateTime.Now;
+                            order.PayTime = item.DateTime;
+                            order.PayAmount = item.RealAmount;
                             await _repository.UpdateAsync(order);
                             orders.Remove(order);
-                            await SendAdminMessage(order);
+                            await SendAdminMessage(order, stoppingToken);
+                        }
+                        else
+                        {
+                            if (UseDynamicAddress && UseDynamicAddressAmountMove)
+                            {
+                                //允许非准确金额支付
+                                var Move = _configuration.GetSection($"DynamicAddressConfig:{erc20.Name}").Get<decimal[]>() ?? [];
+                                if (Move.Length == 2)
+                                {
+                                    var Down = Move[0]; //上浮金额
+                                    var Up = Move[1]; //下浮金额
+                                    order = orders.Where(x => item.RealAmount >= x.Amount - Down && item.RealAmount <= x.Amount + Up)
+                                        .Where(x => x.ToAddress.ToLower() == item.To.ToLower() && x.CreateTime < item.DateTime)
+                                       .OrderByDescending(x => x.CreateTime)//优先付最后一单
+                                       .FirstOrDefault();
+                                    if (order != null)
+                                    {
+                                        order.IsDynamicAmount = true;
+                                        goto recheck;
+                                    }
+                                }
+                            }
+                        }
+                        if (order == null)
+                        {
+                            //已启用动态金额的订单
+                            order = orders.Where(x => x.IsCustomAmount && x.ToAddress.ToLower() == item.To.ToLower() && x.CreateTime < item.DateTime)
+                                .Where(x => x.MinCustomAmount == null || x.MinCustomAmount <= item.RealAmount)
+                                .Where(x => x.MaxCustomAmount == null || x.MaxCustomAmount >= item.RealAmount)
+                                .OrderByDescending(x => x.CreateTime)//优先付最后一单
+                                .FirstOrDefault();
+                            if (order != null)
+                            {
+                                goto recheck;
+                            }
                         }
                     }
                 }
             }
         }
-        private async Task SendAdminMessage(TokenOrders order)
+        private async Task SendAdminMessage(TokenOrders order, CancellationToken stoppingToken)
         {
-            await _channel.Writer.WriteAsync(order);
+            await _channel.Writer.WriteAsync(order, stoppingToken);
         }
     }
 }

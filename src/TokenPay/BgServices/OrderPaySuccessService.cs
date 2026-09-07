@@ -13,7 +13,6 @@ namespace TokenPay.BgServices
         private readonly TelegramBot _bot;
         private readonly List<EVMChain> _chain;
         private readonly IConfiguration _configuration;
-        private readonly ILogger<OrderPaySuccessService> _logger;
 
         public OrderPaySuccessService(
             Channel<TokenOrders> channel,
@@ -28,18 +27,21 @@ namespace TokenPay.BgServices
             this._bot = bot;
             this._chain = chain;
             this._configuration = configuration;
-            this._logger = logger;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            while (!stoppingToken.IsCancellationRequested && await _channel.Reader.WaitToReadAsync())
+            while (!stoppingToken.IsCancellationRequested && await _channel.Reader.WaitToReadAsync(stoppingToken))
             {
                 while (!stoppingToken.IsCancellationRequested && _channel.Reader.TryRead(out var item))
                 {
                     try
                     {
-                        await SendAdminMessage(item);
+                        await SendAdminMessage(item, stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch (Exception e)
                     {
@@ -48,7 +50,7 @@ namespace TokenPay.BgServices
                 }
             }
         }
-        private async Task SendAdminMessage(TokenOrders order)
+        private async Task SendAdminMessage(TokenOrders order, CancellationToken? cancellationToken = null)
         {
             //默认货币
             var BaseCurrency = _configuration.GetValue<string>("BaseCurrency", "CNY");
@@ -57,11 +59,13 @@ namespace TokenPay.BgServices
             {
                 order.Currency = order.Currency.Replace(item, "");
             }
+            var curreny = order.Currency.Replace("TRC20", "").Split("_", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Last();
             var message = @$"<b>您有新订单！({order.ActualAmount} {BaseCurrency})</b>
 
 订单编号：<code>{order.OutOrderId}</code>
 原始金额：<b>{order.ActualAmount} {BaseCurrency}</b>
-订单金额：<b>{order.Amount} {order.Currency.Replace("TRC20", "").Split("_", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Last()}</b>
+订单金额：<b>{order.Amount} {curreny}</b>
+实付金额：<b>{order.PayAmount} {curreny}</b>{(order.IsDynamicAmount ? "(动态金额订单)" : "")}
 付款地址：<code>{order.FromAddress}</code>
 收款地址：<code>{order.ToAddress}</code>
 创建时间：<b>{order.CreateTime:yyyy-MM-dd HH:mm:ss}</b>
@@ -85,13 +89,13 @@ namespace TokenPay.BgServices
                 {
                     if (order.Currency.StartsWith($"EVM_{chain.ChainNameEN}"))
                     {
-                        if(!string.IsNullOrEmpty(chain.ScanHost))
+                        if (!string.IsNullOrEmpty(chain.ScanHost))
                             message += @$"  <b><a href=""{chain.ScanHost}/tx/{order.BlockTransactionId}"">查看交易</a></b>";
                         break;
                     }
                 }
             }
-            await _bot.SendTextMessageAsync(message);
+            await _bot.SendTextMessageAsync(message, cancellationToken: cancellationToken);
         }
     }
 }

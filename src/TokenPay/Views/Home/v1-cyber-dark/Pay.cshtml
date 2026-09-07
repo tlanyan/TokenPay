@@ -1,0 +1,375 @@
+@{
+    Layout = null;
+    ViewData["Title"] = "支付页";
+    var Now = DateTime.Now.ToUniversalTime();
+    var ExpireTime = ViewData.ContainsKey("ExpireTime") ? Convert.ToDateTime(ViewData["ExpireTime"]).ToUniversalTime() : Now;
+}
+@using TokenPay.Domains;
+@using TokenPay.Extensions
+@using TokenPay.Models.EthModel;
+@model TokenPay.Domains.TokenOrders
+@inject List<EVMChain> chain
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>@ViewData["Title"]</title>
+<style>
+  :root{
+    --bg:#0B0E14;
+    --panel:rgba(21,26,37,.55);
+    --panel-solid:#121720;
+    --line:rgba(148,163,184,.14);
+    --cyan:#22d3ee;
+    --green:#34d399;
+    --text:#E9EEF7;
+    --muted:#8B94A7;
+    --amber:#FBBF24;
+    --danger:#FB7185;
+    --mono:'JetBrains Mono','Cascadia Code',Consolas,'SF Mono',Menlo,monospace;
+    --sans:-apple-system,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{min-height:100%}
+  body{
+    font-family:var(--sans);color:var(--text);
+    background:
+      radial-gradient(900px 520px at 12% -8%, rgba(34,211,238,.16), transparent 60%),
+      radial-gradient(820px 560px at 108% 4%, rgba(52,211,153,.13), transparent 55%),
+      radial-gradient(760px 760px at 50% 118%, rgba(99,102,241,.14), transparent 62%),
+      var(--bg);
+    min-height:100vh;display:flex;align-items:center;justify-content:center;
+    padding:34px 16px;position:relative;overflow-x:hidden;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;opacity:.5;
+    background:
+      linear-gradient(rgba(148,163,184,.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148,163,184,.05) 1px, transparent 1px);
+    background-size:46px 46px;
+    -webkit-mask-image:radial-gradient(ellipse 80% 70% at 50% 40%, #000 30%, transparent 100%);
+            mask-image:radial-gradient(ellipse 80% 70% at 50% 40%, #000 30%, transparent 100%);
+  }
+  .glass{
+    position:relative;width:min(560px,100%);border-radius:24px;
+    background:linear-gradient(165deg, rgba(255,255,255,.07), rgba(255,255,255,.02) 45%, rgba(34,211,238,.04));
+    border:1px solid var(--line);
+    -webkit-backdrop-filter:blur(22px) saturate(140%);backdrop-filter:blur(22px) saturate(140%);
+    box-shadow:0 30px 90px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.08);
+    overflow:hidden;
+  }
+  .glass::before{
+    content:"";position:absolute;top:0;left:8%;right:8%;height:1px;
+    background:linear-gradient(90deg, transparent, var(--cyan), var(--green), transparent);
+    filter:drop-shadow(0 0 6px rgba(34,211,238,.8));opacity:.9;
+  }
+  .glass::after{
+    content:"";position:absolute;top:-120px;right:-120px;width:300px;height:300px;border-radius:50%;
+    background:radial-gradient(circle, rgba(34,211,238,.18), transparent 70%);
+    pointer-events:none;
+  }
+  .inner{position:relative;padding:26px 28px 22px}
+
+  .blank{width:100%;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center}
+  .blank h1{font-size:34px;font-weight:800;color:#fff}
+  .blank p{font-family:var(--mono);font-size:12px;letter-spacing:3px;color:var(--muted)}
+  .blank.ok h1{background:linear-gradient(100deg,#7dd3fc,#22d3ee 50%,#34d399);-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;letter-spacing:.4px}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 10px var(--green),0 0 22px rgba(52,211,153,.6);animation:pulse 2.2s infinite}
+  @@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+  .chip{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:999px;
+    border:1px solid rgba(34,211,238,.35);background:rgba(34,211,238,.08);color:#a5f3fc;font-size:12px;font-weight:600}
+  .chip .p{width:6px;height:6px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan)}
+
+  .pay-for{font-size:15px;font-weight:400;color:var(--muted);margin-bottom:2px;letter-spacing:.3px}
+  .pay-for b{color:var(--text);font-weight:600}
+  .coin-line{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .coin-line .coin{
+    font-size:44px;font-weight:700;line-height:1.05;letter-spacing:.5px;
+    background:linear-gradient(100deg,#7dd3fc,#22d3ee 45%,#34d399);-webkit-background-clip:text;background-clip:text;color:transparent;
+    font-family:var(--mono);
+  }
+  .coin-line .net{font-size:13px;color:var(--muted)}
+
+  .timer{margin-top:18px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    border:1px solid var(--line);border-radius:16px;padding:12px 16px;
+    background:rgba(11,14,20,.4)}
+  .timer .lbl{font-size:13px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+  .timer .lbl i{font-style:normal;font-size:11px;color:var(--amber)}
+  .t-cells{display:flex;gap:8px;margin-left:auto}
+  .t-cell{min-width:52px;text-align:center;padding:8px 6px;border-radius:12px;background:rgba(34,211,238,.06);
+    border:1px solid rgba(34,211,238,.18);font-family:var(--mono)}
+  .t-cell .v{font-size:22px;font-weight:700;color:#7ff0ff;text-shadow:0 0 12px rgba(34,211,238,.5)}
+  .t-cell .u{font-size:10px;color:var(--muted);margin-top:2px}
+  .t-cell.off{opacity:.18}
+
+  .warn{margin-top:16px;display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.7;color:#fda4af;
+    padding:11px 14px;border-radius:14px;background:rgba(251,113,133,.07);border:1px solid rgba(251,113,133,.22)}
+  .warn .ico{flex:none;width:18px;height:18px;margin-top:2px}
+  .warn b{color:#fecdd3}
+
+  .fee-warn{margin-top:14px;padding:13px 15px;border-radius:14px;font-size:12.5px;line-height:1.8;
+    border:1px solid rgba(251,191,36,.3);background:rgba(251,191,36,.06);color:#fde68a}
+  .fee-warn b{color:#fcd34d}
+  .fee-warn .row{padding-left:2px}
+  .fee-warn .row::before{content:"· ";color:var(--amber)}
+
+  .addr{margin-top:16px}
+  .addr .cap{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--muted);
+    text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px}
+  .addr .cap .tag{color:var(--cyan);text-transform:none;letter-spacing:0}
+  .field{display:flex;align-items:center;gap:10px;padding:10px 10px 10px 16px;border-radius:14px;
+    background:var(--panel-solid);border:1px solid var(--line);transition:.25s}
+  .field:focus-within{border-color:rgba(34,211,238,.6);box-shadow:0 0 0 3px rgba(34,211,238,.12),0 0 24px rgba(34,211,238,.15)}
+  .field input{border:0;background:transparent;color:#cfe6ff;font-family:var(--mono);font-size:12.5px;flex:1;outline:none;min-width:0}
+  .field .glyph{color:var(--green);opacity:.8}
+
+  .btn{display:inline-flex;align-items:center;gap:8px;border:0;cursor:pointer;font-weight:700;border-radius:12px;
+    transition:transform .15s, box-shadow .25s, filter .25s;white-space:nowrap}
+  .btn:active{transform:scale(.96)}
+  .btn.ghost{background:rgba(34,211,238,.1);color:#7ff0ff;border:1px solid rgba(34,211,238,.35);padding:8px 14px;font-size:13px}
+  .btn.ghost:hover{background:rgba(34,211,238,.2);box-shadow:0 0 18px rgba(34,211,238,.3)}
+  .btn.copy{background:linear-gradient(135deg,#22d3ee,#34d399);color:#051512;padding:8px 14px;font-size:13px}
+  .btn.copy:hover{box-shadow:0 0 22px rgba(52,211,153,.55),0 0 8px rgba(34,211,238,.6);filter:brightness(1.06)}
+
+  .qr-zone{margin-top:20px;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .qr-tile{position:relative;padding:8px;border-radius:20px;background:rgba(255,255,255,.03);
+    border:1px solid var(--line);box-shadow:0 0 0 1px rgba(255,255,255,.02), 0 18px 50px rgba(0,0,0,.4)}
+  .qr-tile::before{content:"";position:absolute;inset:-1px;border-radius:inherit;padding:1px;
+    background:linear-gradient(140deg, rgba(34,211,238,.6), transparent 35%, transparent 65%, rgba(52,211,153,.5));
+    -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
+  #qr{display:block;width:248px;height:248px;border-radius:14px;background:#fff}
+  .qr-zone .addr-sm{margin-top:14px;font-family:var(--mono);font-size:12px;color:#9fb0c8;
+    word-break:break-all;max-width:300px;line-height:1.6}
+  .qr-zone .addr-sm span{color:var(--green)}
+
+  .amount{margin-top:20px;border-top:1px dashed rgba(148,163,184,.16);padding-top:18px}
+  .amount .row1{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .amount .lbl{font-size:13px;color:var(--muted)}
+  .amount .val{font-family:var(--mono);font-size:30px;font-weight:700;color:#fff;letter-spacing:.5px}
+  .amount .val small{font-size:15px;color:var(--green);font-weight:600;margin-left:2px}
+  .custom-tip{margin-top:8px;display:block;font-size:13px;line-height:1.8;color:#a7f3d0;
+    border:1px dashed rgba(52,211,153,.45);background:rgba(52,211,153,.07);padding:10px 12px;border-radius:12px}
+
+  .meta{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+  .meta .cell{padding:12px 14px;border-radius:14px;background:rgba(255,255,255,.03);border:1px solid var(--line)}
+  .meta .k{font-size:11px;color:var(--muted);letter-spacing:1px}
+  .meta .v{margin-top:5px;font-family:var(--mono);font-size:13.5px;color:#dbe7ff;word-break:break-all}
+
+  .buy{margin-top:20px;border-top:1px solid var(--line);padding-top:14px}
+  .buy .h{font-size:12px;color:var(--muted);margin-bottom:10px;letter-spacing:.6px}
+  .buy a{display:flex;align-items:center;justify-content:space-between;text-decoration:none;color:var(--text);
+    padding:12px 14px;border-radius:14px;border:1px solid var(--line);margin-bottom:8px;transition:.2s}
+  .buy a:hover{border-color:rgba(34,211,238,.5);background:rgba(34,211,238,.06);transform:translateX(3px)}
+  .buy .n{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:7px;
+    background:rgba(52,211,153,.15);color:var(--green);font-size:12px;font-weight:700;margin-right:10px}
+  .buy .site{font-weight:600;font-size:14px}
+  .buy .coin2{font-size:12px;color:var(--muted)}
+  .buy .arr{color:var(--cyan);opacity:.7}
+
+  footer{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:18px;
+    font-size:11px;color:rgba(139,148,167,.7);letter-spacing:.5px}
+
+  .toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,20px);opacity:0;pointer-events:none;
+    background:rgba(13,17,24,.92);border:1px solid rgba(52,211,153,.5);color:#a7f3d0;
+    padding:10px 18px;border-radius:999px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.5);
+    transition:.3s;z-index:99}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+
+  @@media (max-width:520px){
+    .coin-line .coin{font-size:36px}
+    #qr{width:210px;height:210px}
+    .meta{grid-template-columns:1fr}
+  }
+  .tplink{color:inherit;text-decoration:none;cursor:pointer;border-bottom:1px solid transparent;transition:.18s}
+  .tplink:hover{color:#7ff0ff;text-shadow:0 0 12px rgba(34,211,238,.55);border-color:rgba(34,211,238,.5)}
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast">✓ 已复制到剪贴板</div>
+
+@if (Model == null)
+{
+    <main class="blank">
+        <h1>订单不存在！</h1>
+        <p>ORDER NOT FOUND</p>
+    </main>
+}
+else if (Model.Status == OrderStatus.Paid)
+{
+    <main class="blank ok">
+        <h1>订单已支付！</h1>
+        <p>ORDER PAID</p>
+    </main>
+}
+else
+{
+    <main class="glass">
+      <div class="inner">
+
+        <div class="topbar">
+          <div class="brand"><span class="dot"></span><a class="tplink" href="https://github.com/LightCountry/TokenPay" target="_blank" rel="noopener">TokenPay</a><span style="color:var(--muted);font-weight:400">· 安全收款</span></div>
+          <span class="chip"><span class="p"></span>订单状态实时检测中</span>
+        </div>
+
+        <p class="pay-for">您正在支付 <b>@Model.Currency.ToBlockchainName(chain)</b> 的</p>
+        <div class="coin-line">
+          <span class="coin">@Model.Currency.ToCurrency(chain, true)</span>
+          <span class="net">@Model.Currency.ToBlockchainEnglishName(chain) 网络 · 收款请求</span>
+        </div>
+
+        <div class="timer">
+          <div class="lbl">剩余时间<i>订单过期后自动失效</i></div>
+          <div class="t-cells">
+            <div class="t-cell off" id="dBox"><div class="v" data-u="d">00</div><div class="u">天</div></div>
+            <div class="t-cell"><div class="v" data-u="h">00</div><div class="u">时</div></div>
+            <div class="t-cell"><div class="v" data-u="m">00</div><div class="u">分</div></div>
+            <div class="t-cell"><div class="v" data-u="s">00</div><div class="u">秒</div></div>
+          </div>
+        </div>
+
+        <div class="warn">
+          <svg class="ico" viewBox="0 0 24 24" fill="none"><path d="M12 8v5M12 16.5v.5" stroke="#fb7185" stroke-width="2" stroke-linecap="round"/><path d="M10.3 4.2 2.6 17a2 2 0 0 0 1.7 3h15.4a2 2 0 0 0 1.7-3L13.7 4.2a2 2 0 0 0-3.4 0Z" stroke="#fb7185" stroke-width="2" stroke-linejoin="round"/></svg>
+          <div><b>请仔细核对区块链和币种</b>，避免丢失资产或支付失败！</div>
+        </div>
+
+        <div class="fee-warn">
+          <div><b>请确保到账金额与应付金额完全一致。</b></div>
+          <div class="row">自有钱包转账：按应付金额原额转入即可（钱包通常会另外扣除手续费）；</div>
+          <div class="row">交易所/中心化钱包提币：会扣除固定提币手续费，请提币“应付金额 + 手续费”，确保扣费后到账恰好等于应付金额。</div>
+        </div>
+
+        <div class="addr">
+          <div class="cap"><span>收款地址 / ADDRESS</span><span class="tag">@Model.Currency.ToCurrency(chain)</span></div>
+          <div class="field">
+            <span class="glyph">◈</span>
+            <input type="text" readonly value="@Model.ToAddress"/>
+            <button class="btn copy" data-copy data-copy-value="@Model.ToAddress">复制地址</button>
+          </div>
+        </div>
+
+        <div class="qr-zone">
+          <div class="qr-tile"><img id="qr" src="data:image/png;base64,@ViewData["QrCode"]" alt="收款二维码"/></div>
+          <div class="addr-sm">扫描上方二维码 或 转账至<br/><span>@Model.ToAddress</span></div>
+        </div>
+
+        <div class="amount">
+          @if (Model.IsCustomAmount)
+          {
+              <div class="lbl">支付金额 / AMOUNT</div>
+              <span class="custom-tip">
+              @if (Model.MinCustomAmount.HasValue && Model.MaxCustomAmount.HasValue)
+              {
+                  <text>支持任意金额，但支付金额不能小于 @Model.MinCustomAmount @Model.Currency.ToCurrency(chain) 不能超过 @Model.MaxCustomAmount @Model.Currency.ToCurrency(chain)</text>
+              }
+              else if (Model.MinCustomAmount.HasValue)
+              {
+                  <text>支持任意金额，但最少支付 @Model.MinCustomAmount @Model.Currency.ToCurrency(chain)</text>
+              }
+              else if (Model.MaxCustomAmount.HasValue)
+              {
+                  <text>支持任意金额，但最多支付 @Model.MaxCustomAmount @Model.Currency.ToCurrency(chain)</text>
+              }
+              else
+              {
+                  <text>支持任意金额 @Model.Currency.ToCurrency(chain)</text>
+              }
+              </span>
+          }
+          else
+          {
+              <div class="row1">
+                <span class="lbl">支付金额 / AMOUNT</span>
+                <span class="val">@Model.Amount<small>@Model.Currency.ToCurrency(chain)</small></span>
+              </div>
+              <div style="margin-top:12px;text-align: right;">
+                <button class="btn ghost" data-copy data-copy-value="@Model.Amount">⧉ 复制金额</button>
+              </div>
+          }
+        </div>
+
+        <div class="meta">
+          <div class="cell"><div class="k">订单编号</div><div class="v">@Model.OutOrderId</div></div>
+          <div class="cell"><div class="k">过期时间</div><div class="v">@ExpireTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</div></div>
+        </div>
+
+        <div class="buy">
+          <div class="h">区块链货币购买地址</div>
+          <a href="https://www.okx.com/buy-crypto#sourceBase=@Model.Currency.ToCurrency(chain)" target="_blank">
+            <span><span class="n">1</span><span class="site">OKX（欧易）</span></span>
+            <span class="coin2">购买 @Model.Currency.ToCurrency(chain)</span><span class="arr">→</span>
+          </a>
+          <a href="https://p2p.binance.com/express/buy/@Model.Currency.ToCurrency(chain)" target="_blank">
+            <span><span class="n">2</span><span class="site">Binance（币安）</span></span>
+            <span class="coin2">购买 @Model.Currency.ToCurrency(chain)</span><span class="arr">→</span>
+          </a>
+        </div>
+
+        <footer><span class="dot" style="width:6px;height:6px;border-radius:50%;background:var(--green)"></span> <a class="tplink" href="https://github.com/LightCountry/TokenPay" target="_blank" rel="noopener">TokenPay</a> · 区块链收款 · 实时链上检测 · 自动到账</footer>
+      </div>
+    </main>
+}
+
+<script>
+(function(){
+  var active = document.querySelector('.glass');
+  if(!active) return;
+
+  /* ========== 倒计时（由服务端 ExpireTime 计算剩余时间） ========== */
+  var EndTime = new Date('@ExpireTime.ToUniversalTime().ToString("yyyy/MM/dd HH:mm:ss")');
+  var els = { d:document.querySelector('[data-u="d"]'), h:document.querySelector('[data-u="h"]'),
+              m:document.querySelector('[data-u="m"]'), s:document.querySelector('[data-u="s"]') };
+  var dBox = document.getElementById('dBox');
+  function p(n){ return n<10?'0'+n:''+n; }
+  function timer(){
+    var intDiff = (EndTime - new Date(new Date().toISOString().replace('T',' ').replace('Z',''))) / 1000;
+    if(intDiff <= 0) return;
+    intDiff = Math.floor(intDiff);
+    var day = Math.floor(intDiff / 86400);
+    var hour = Math.floor(intDiff / 3600) - day*24;
+    var minute = Math.floor(intDiff / 60) - day*1440 - hour*60;
+    var second = intDiff - day*86400 - hour*3600 - minute*60;
+    els.d.textContent = p(day);
+    els.h.textContent = p(hour);
+    els.m.textContent = p(minute);
+    els.s.textContent = p(second);
+    dBox.classList.toggle('off', day<=0);
+  }
+  setInterval(timer,1000); timer();
+
+  /* ========== 复制（Clipboard API + 兼容降级） ========== */
+  var toast = document.getElementById('toast'), tId=null;
+  function flash(){ toast.classList.add('show'); clearTimeout(tId); tId=setTimeout(function(){toast.classList.remove('show');},1400); }
+  function fallback(text){ var ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); }
+  document.querySelectorAll('[data-copy]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var text = btn.getAttribute('data-copy-value') || '';
+      if(navigator.clipboard && window.isSecureContext){ navigator.clipboard.writeText(text).then(flash).catch(function(){fallback(text);flash();}); }
+      else { fallback(text); flash(); }
+    });
+  });
+
+  /* ========== 订单状态轮询（GET /Check/{Id}） ========== */
+  var RedirectUrl = "@(Model?.RedirectUrl)";
+  var Time = setInterval(Check, 3000);
+  function Check(){
+    fetch("/Check/@(Model?.Id)", { cache:'no-store' })
+      .then(function(r){ return r.text(); })
+      .then(function(x){
+        if(x === 'Pending'){ console.log('待支付'); }
+        else if(x === 'Expired'){ clearInterval(Time); location.reload(); }
+        else if(x === 'Paid'){
+          clearInterval(Time);
+          if(RedirectUrl){ location.href = RedirectUrl; } else { location.reload(); }
+        }
+      });
+  }
+})();
+</script>
+</body>
+</html>

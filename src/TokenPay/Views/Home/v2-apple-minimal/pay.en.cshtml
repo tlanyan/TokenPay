@@ -1,0 +1,319 @@
+@{
+    Layout = null;
+    ViewData["Title"] = "Pay";
+    var Now = DateTime.Now.ToUniversalTime();
+    var ExpireTime = ViewData.ContainsKey("ExpireTime") ? Convert.ToDateTime(ViewData["ExpireTime"]).ToUniversalTime() : Now;
+}
+@using TokenPay.Domains;
+@using TokenPay.Extensions
+@using TokenPay.Models.EthModel;
+@model TokenPay.Domains.TokenOrders
+@inject List<EVMChain> chain
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>@ViewData["Title"]</title>
+<style>
+  :root{
+    --bg:#F5F5F7;
+    --card:#FFFFFF;
+    --ink:#1D1D1F;
+    --sub:#6E6E73;
+    --faint:#86868B;
+    --line:#E8E8ED;
+    --tile:#F5F5F7;
+    --blue:#0071E3;
+    --blue-soft:#E8F1FD;
+    --green:#1DB954;
+    --mono:'SF Mono','Menlo',Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI','SF Pro Text','PingFang SC','Microsoft YaHei',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:var(--sans);color:var(--ink);background:var(--bg);
+    min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px;
+    -webkit-font-smoothing:antialiased;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;
+    background:radial-gradient(900px 500px at 50% -12%, rgba(0,113,227,.06), transparent 60%);
+  }
+  .card{
+    width:min(620px,100%);background:var(--card);border-radius:28px;
+    padding:46px 48px 40px;position:relative;
+    box-shadow:0 1px 2px rgba(0,0,0,.04),0 12px 32px rgba(0,0,0,.05),0 32px 72px rgba(0,0,0,.07);
+  }
+  @@media (max-width:560px){ .card{padding:32px 24px 28px;border-radius:22px} }
+
+  .blank{width:100%;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;text-align:center}
+  .blank h1{font-size:42px;font-weight:800;letter-spacing:-1px;color:var(--ink)}
+  .blank p{font-size:13px;color:var(--faint)}
+  .blank.ok h1{color:var(--green)}
+
+  .tag{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--sub);font-weight:500;margin-bottom:26px}
+  .tag .mark{width:10px;height:10px;border-radius:3px;background:var(--blue)}
+  .topline{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:26px}
+  .topline .tag{margin-bottom:0}
+  .status-chip{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:500;color:var(--sub);
+    background:var(--tile);border:1px solid var(--line);padding:6px 13px;border-radius:980px;white-space:nowrap}
+  .status-chip .dot{width:8px;height:8px;border-radius:50%;background:var(--green);animation:blink 1.6s infinite}
+  .headline{margin-bottom:8px}
+  .headline .eyebrow{font-size:14px;color:var(--sub);font-weight:400;letter-spacing:.2px}
+  .headline h1{font-size:32px;font-weight:700;letter-spacing:-.5px;margin-top:6px;color:var(--ink);line-height:1.25}
+  .headline h1 .thin{font-weight:300;color:var(--sub)}
+  .note{font-size:14px;color:var(--faint);margin-top:6px}
+
+  .divider{height:1px;background:var(--line);margin:30px 0}
+
+  .timerline{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  .timerline .l{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--sub)}
+  .timerline .l .p{width:8px;height:8px;border-radius:50%;background:var(--blue);animation:blink 1.6s infinite}
+  @@keyframes blink{50%{opacity:.35}}
+  .timerline .t{display:flex;align-items:baseline;gap:4px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .timerline .t b{font-size:24px;font-weight:600;letter-spacing:.5px;color:var(--ink)}
+  .timerline .t span{font-size:12px;color:var(--faint)}
+
+  .qr-block{margin-top:8px;display:grid;grid-template-columns:auto 1fr;gap:34px;align-items:center}
+  .qr-tile{width:236px;height:236px;padding:16px;border-radius:22px;background:var(--tile);
+    display:flex;align-items:center;justify-content:center}
+  #qr{width:204px;height:204px;border-radius:8px}
+  .qr-side .cap{font-size:12px;color:var(--faint);letter-spacing:.6px;text-transform:uppercase;margin-bottom:14px}
+  .qr-side .sum{font-size:44px;font-weight:700;letter-spacing:-1px;line-height:1}
+  .qr-side .sum small{font-size:20px;font-weight:600;color:var(--blue);margin-left:6px}
+  .qr-side .sub2{margin-top:10px;font-size:14px;color:var(--sub)}
+  .qr-side .sub2 b{color:var(--ink);font-weight:600}
+  .qr-side .copyrow{margin-top:14px}
+  .qr-side .custom{margin-top:6px;font-size:15px;line-height:1.8;color:var(--ink);font-weight:500;
+    background:var(--tile);padding:14px 16px;border-radius:16px}
+  .qr-side .custom small{display:block;font-size:13px;color:var(--faint);font-weight:400;margin-bottom:6px}
+
+  .addr-box{margin-top:28px}
+  .addr-box .cap{font-size:12px;color:var(--faint);letter-spacing:.6px;text-transform:uppercase;margin-bottom:8px}
+  .addr-row{display:flex;align-items:center;gap:4px;background:var(--tile);border-radius:16px;padding:6px 6px 6px 18px}
+  .addr-row .sep{flex:1;display:flex;align-items:center;overflow:hidden;white-space:nowrap;font-family:var(--mono);font-size:13px;color:#44444b}
+  .btn{border:0;cursor:pointer;font-weight:600;border-radius:980px;transition:.2s;white-space:nowrap}
+  .btn.blue{background:var(--blue);color:#fff;padding:10px 18px;font-size:14px}
+  .btn.blue:hover{filter:brightness(1.08)}
+  .btn.ghost2{background:transparent;color:var(--blue);padding:10px 16px;font-size:14px}
+  .btn.ghost2:hover{background:var(--blue-soft)}
+  .btn.tiny{padding:8px 16px;font-size:13px}
+
+  .caution{margin-top:18px;display:flex;align-items:flex-start;gap:12px;padding:13px 15px;border-radius:16px;
+    background:#FFF8E8;border:1px solid #F0DCA8;color:#6b5200}
+  .caution .ico{flex:none;width:20px;height:20px;border-radius:50%;background:#F5A623;color:#fff;
+    font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center;margin-top:1px}
+  .caution .txt{font-size:13px;line-height:1.7}
+  .caution .txt b{color:#8a5a00}
+
+  .fee-note{margin-top:14px;padding:12px 15px;border-radius:16px;font-size:12.5px;line-height:1.75;
+    background:#FFF8E8;border:1px solid #F0DCA8;color:#6b5200}
+  .fee-note b{color:#8a5a00;display:block;margin-bottom:4px}
+  .fee-note .row::before{content:"· ";color:#d79a1f}
+
+  .meta{display:grid;grid-template-columns:1fr 1fr;gap:14px 28px;margin-top:28px}
+  .meta .item .k{font-size:12px;color:var(--faint)}
+  .meta .item .v{margin-top:5px;font-size:15px;font-weight:500;font-family:var(--mono);color:var(--ink);word-break:break-all}
+  @@media (max-width:620px){ .meta{grid-template-columns:1fr} }
+
+  .buy{margin-top:34px;border-top:1px solid var(--line);padding-top:24px}
+  .buy .h{font-size:15px;font-weight:600;margin-bottom:4px}
+  .buy .h small{display:block;font-size:12px;color:var(--faint);font-weight:400;margin-top:3px}
+  .buy .row{display:flex;align-items:center;gap:18px;justify-content:space-between;padding:16px 2px;border-bottom:1px solid var(--line);text-decoration:none}
+  .buy .row:last-of-type{border-bottom:0}
+  .buy .site{display:flex;align-items:center;gap:12px}
+  .buy .badge{width:34px;height:34px;border-radius:10px;background:var(--tile);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;color:var(--ink)}
+  .buy .row .name{font-size:16px;font-weight:500;color:var(--ink)}
+  .buy .row .right{display:flex;align-items:center;gap:14px}
+  .buy .row .ct{font-size:13px;color:var(--faint)}
+  .buy .row .go{color:var(--blue);font-size:18px;font-weight:300;transition:.2s}
+  .buy .row:hover .go{transform:translateX(4px)}
+
+  .foot{display:flex;justify-content:space-between;align-items:center;margin-top:30px;
+    font-size:12px;color:var(--faint);border-top:1px solid var(--line);padding-top:18px}
+  .foot .ok{display:inline-flex;align-items:center;gap:6px;color:var(--green);font-weight:500}
+
+  .toast{position:fixed;left:50%;bottom:30px;transform:translate(-50%,14px);opacity:0;pointer-events:none;
+    background:rgba(28,28,30,.92);color:#fff;padding:11px 20px;border-radius:980px;font-size:13px;
+    transition:.25s;z-index:99;box-shadow:0 10px 30px rgba(0,0,0,.2)}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+
+  @@media (max-width:680px){
+    .qr-block{grid-template-columns:1fr;justify-items:center;text-align:center}
+    .qr-side{text-align:center}
+    .sum{font-size:38px}
+  }
+  .tplink{color:inherit;text-decoration:none;cursor:pointer;border-bottom:1px solid transparent;transition:.15s}
+  .tplink:hover{color:var(--blue);border-color:var(--blue)}
+</style>
+</head>
+<body>
+
+<div class="toast" id="toast">Copied</div>
+
+@if (Model == null)
+{
+    <main class="blank">
+        <h1>Order not found</h1>
+        <p>Order does not exist</p>
+    </main>
+}
+else if (Model.Status == OrderStatus.Paid)
+{
+    <main class="blank ok">
+        <h1>Order paid</h1>
+        <p>Order paid</p>
+    </main>
+}
+else
+{
+    <div class="card">
+
+      <div class="topline">
+        <div class="tag"><span class="mark"></span><a class="tplink" href="https://github.com/LightCountry/TokenPay" target="_blank" rel="noopener">TokenPay</a> · Secure Payment</div>
+        <span class="status-chip"><span class="dot"></span>Live order status</span>
+      </div>
+
+      <div class="headline">
+        <div class="eyebrow">YOUR ORDER</div>
+        <h1>You are paying <span class="thin">@Model.Currency.ToBlockchainEnglishName(chain)</span><br/>@Model.Currency.ToCurrency(chain, true) network transfer</h1>
+        <div class="note">Please transfer the exact amount within your order; arrival will be confirmed automatically.</div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="timerline">
+        <div class="l"><span class="p"></span>Time left to pay</div>
+        <div class="t">
+          <b data-u="h">00</b><span>hrs</span>
+          <b data-u="m">00</b><span>mins</span>
+          <b data-u="s">00</b><span>secs</span>
+        </div>
+      </div>
+
+      <div class="qr-block">
+        <div class="qr-tile"><img id="qr" src="data:image/png;base64,@ViewData["QrCode"]" alt="Payment QR code"/></div>
+        <div class="qr-side">
+          <div class="cap">Amount payable</div>
+          @if (Model.IsCustomAmount)
+          {
+              <div class="custom">
+                  <small>Custom amount</small>
+                  @if (Model.MinCustomAmount.HasValue && Model.MaxCustomAmount.HasValue)
+                  {
+                      <text>The amount cannot be less than @Model.MinCustomAmount @Model.Currency.ToCurrency(chain) or exceed @Model.MaxCustomAmount @Model.Currency.ToCurrency(chain)</text>
+                  }
+                  else if (Model.MinCustomAmount.HasValue)
+                  {
+                      <text>Minimum payment @Model.MinCustomAmount @Model.Currency.ToCurrency(chain)</text>
+                  }
+                  else if (Model.MaxCustomAmount.HasValue)
+                  {
+                      <text>Maximum payment @Model.MaxCustomAmount @Model.Currency.ToCurrency(chain)</text>
+                  }
+                  else
+                  {
+                      <text>Any amount @Model.Currency.ToCurrency(chain)</text>
+                  }
+              </div>
+          }
+          else
+          {
+              <div class="sum">@Model.Amount<small>@Model.Currency.ToCurrency(chain)</small></div>
+              <div class="sub2">Send exactly <b>@Model.Amount @Model.Currency.ToCurrency(chain)</b> to the address below</div>
+              <div class="copyrow"><button class="btn blue tiny" data-copy data-copy-value="@Model.Amount">Copy amount</button></div>
+          }
+        </div>
+      </div>
+
+      <div class="addr-box">
+        <div class="cap">RECEIVING ADDRESS (@Model.Currency.ToBlockchainEnglishName(chain))</div>
+        <div class="addr-row">
+          <div class="sep">@Model.ToAddress</div>
+          <button class="btn tiny blue" data-copy data-copy-value="@Model.ToAddress">Copy</button>
+        </div>
+      </div>
+
+      <div class="caution">
+        <span class="ico">!</span>
+        <div class="txt"><b>Please double-check the blockchain and currency</b> to avoid losing funds or a failed payment!</div>
+      </div>
+
+      <div class="fee-note">
+        <b>Please ensure the received amount is exactly equal to the amount due.</b>
+        <div class="row">From your own wallet: send the exact amount due (your wallet usually deducts a fee separately);</div>
+        <div class="row">Withdrawing from an exchange / centralized wallet: a fixed withdrawal fee is charged, so withdraw “amount due + fee” to ensure the amount received after the fee exactly equals the amount due.</div>
+      </div>
+
+      <div class="meta">
+        <div class="item"><div class="k">Order No.</div><div class="v">@Model.OutOrderId</div></div>
+        <div class="item"><div class="k">Expires at</div><div class="v">@ExpireTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</div></div>
+      </div>
+
+      <div class="buy">
+        <div class="h">Don't have crypto yet?<small>Buy quickly on trusted exchanges</small></div>
+        <a class="row" href="https://www.okx.com/buy-crypto#sourceBase=@Model.Currency.ToCurrency(chain)" target="_blank">
+          <span class="site"><span class="badge">1</span><span class="name">OKX</span></span>
+          <span class="right"><span class="ct">Buy @Model.Currency.ToCurrency(chain)</span><span class="go">→</span></span>
+        </a>
+        <a class="row" href="https://p2p.binance.com/express/buy/@Model.Currency.ToCurrency(chain)" target="_blank">
+          <span class="site"><span class="badge">2</span><span class="name">Binance</span></span>
+          <span class="right"><span class="ct">Buy @Model.Currency.ToCurrency(chain)</span><span class="go">→</span></span>
+        </a>
+      </div>
+
+      <div class="foot">
+        <span><a class="tplink" href="https://github.com/LightCountry/TokenPay" target="_blank" rel="noopener">TokenPay</a> · Crypto Payments · On-chain monitoring · Auto settlement</span>
+      </div>
+    </div>
+}
+
+<script>
+(function(){
+  var active = document.querySelector('.card');
+  if(!active) return;
+
+  var EndTime = new Date('@ExpireTime.ToUniversalTime().ToString("yyyy/MM/dd HH:mm:ss")');
+  var els = { h:document.querySelector('[data-u="h"]'), m:document.querySelector('[data-u="m"]'), s:document.querySelector('[data-u="s"]') };
+  function p(n){ return n<10?'0'+n:''+n; }
+  function tick(){
+    var intDiff = (EndTime - new Date(new Date().toISOString().replace('T',' ').replace('Z',''))) / 1000;
+    if(intDiff <= 0) return;
+    intDiff = Math.floor(intDiff);
+    var day = Math.floor(intDiff/86400);
+    els.h.textContent = p(Math.floor(intDiff/3600) - day*24);
+    els.m.textContent = p(Math.floor(intDiff/60) - day*1440 - Math.floor(intDiff/3600)*60);
+    els.s.textContent = p(intDiff % 60);
+  }
+  setInterval(tick,1000); tick();
+
+  var toast = document.getElementById('toast'), ti=null;
+  function flash(){ toast.classList.add('show'); clearTimeout(ti); ti=setTimeout(function(){toast.classList.remove('show');},1300); }
+  function fallback(text){ var ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); }
+  document.querySelectorAll('[data-copy]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var text = btn.getAttribute('data-copy-value') || '';
+      if(navigator.clipboard && window.isSecureContext){ navigator.clipboard.writeText(text).then(flash).catch(function(){fallback(text);flash();}); }
+      else { fallback(text); flash(); }
+    });
+  });
+
+  var RedirectUrl = "@(Model?.RedirectUrl)";
+  var Time = setInterval(Check, 3000);
+  function Check(){
+    fetch("/Check/@(Model?.Id)", { cache:'no-store' })
+      .then(function(r){ return r.text(); })
+      .then(function(x){
+        if(x === 'Pending'){ console.log('Pending'); }
+        else if(x === 'Expired'){ clearInterval(Time); location.reload(); }
+        else if(x === 'Paid'){
+          clearInterval(Time);
+          if(RedirectUrl){ location.href = RedirectUrl; } else { location.reload(); }
+        }
+      });
+  }
+})();
+</script>
+</body>
+</html>

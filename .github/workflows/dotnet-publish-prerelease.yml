@@ -1,0 +1,97 @@
+name: Build Pre-Release
+
+on:
+  push:
+    tags:
+      - pre-v*
+
+jobs:
+  build:
+    name: Build And Publish
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./src
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        global-json-file: global.json
+    - name: Show .NET SDK
+      run: dotnet --info
+    - name: Publish
+      run: |
+          TAG_NAME=${{ github.ref_name }}
+          VERSION=${TAG_NAME#pre-v}
+          echo "Version is $VERSION"
+          dotnet publish -c Release -p:Version=$VERSION -r linux-x64 --self-contained -p:PublishTrimmed=true -p:PublishSingleFile=true -o app/linux-x64
+          dotnet publish -c Release -p:Version=$VERSION -r win-x64 --self-contained -p:PublishTrimmed=true -p:PublishSingleFile=true -o app/win-x64
+          dotnet publish -c Release -p:Version=$VERSION -r linux-arm64 --self-contained -p:PublishTrimmed=true -p:PublishSingleFile=true -o app/linux-arm64
+          dotnet publish -c Release -p:Version=$VERSION -r linux-x64 --self-contained false -p:PublishTrimmed=false -p:PublishSingleFile=true -o app/linux-x64-framework-dependent
+          dotnet publish -c Release -p:Version=$VERSION -r win-x64 --self-contained false -p:PublishTrimmed=false -p:PublishSingleFile=true -o app/win-x64-framework-dependent
+          dotnet publish -c Release -p:Version=$VERSION -r linux-arm64 --self-contained false -p:PublishTrimmed=false -p:PublishSingleFile=true -o app/linux-arm64-framework-dependent
+          cd app
+          find . -type f -name 'appsettings.Example.json' -execdir mv {} appsettings.json \;
+          find . -maxdepth 1 -type d ! -name '.' | xargs -I {} sh -c 'cd "{}" && zip -r "../${{ github.event.repository.name }}-${{ github.ref_name }}-$(basename {}).zip" *'
+          find . -maxdepth 1 -type d ! -name '.' -exec rm -rf {} +
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: app
+        if-no-files-found: error
+        path: ${{ github.workspace }}/src/app
+
+  create_release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app
+          path: app
+          
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: ${{ github.event.repository.name }} ${{ github.ref }}
+          draft: true
+          prerelease: true
+
+      - name: Upload ZIP files to Release
+        id: upload_zip
+        uses: actions/github-script@v3
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+          script: |
+            const path = require('path');
+            const fs = require('fs');
+            const release_id = '${{ steps.create_release.outputs.id }}';
+            for (let file of await fs.readdirSync('app/')) {
+              if (path.extname(file) === '.zip') {
+                console.log('uploadReleaseAsset', file);
+                await github.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release_id,
+                  name: file,
+                  data: await fs.readFileSync(`app/${file}`)
+                });
+              }
+            }
+
+  cleanup:
+    name: Cleanup
+    needs: create_release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove artifacts
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: "*"

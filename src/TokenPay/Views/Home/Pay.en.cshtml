@@ -12,10 +12,18 @@
 {
     <div class="row align-items-center h-100">
         <div class="text-center">
-            <h1 class="display-4">Order does not exist!</h1>
+            <h1 class="display-4 text-danger">Order does not exist!</h1>
         </div>
     </div>
 
+}
+else if (Model.Status == OrderStatus.Paid)
+{
+    <div class="row align-items-center h-100">
+        <div class="text-center">
+            <h1 class="display-4 text-success">Order paid!</h1>
+        </div>
+    </div>
 }
 else
 {
@@ -53,20 +61,47 @@ else
             <img src="data:image/png;base64,@ViewData["QrCode"]" class="border border-gray-300" alt="address">
             <div class="text-danger fw-semibold address" style="position:relative;top:-24px;height:0;">@Model.ToAddress</div>
         </div>
-        <div class="text-start m-auto" style="width:300px;">
+        <div class="text-start m-auto" style="width:410px;">
             <div class="mb-2 fw-bold">
-                Amount：<span class="text-danger">@Model.Amount @Model.Currency.ToCurrency(chain)</span><button class="btn btn-primary btn-sm ms-2" data-clipboard-text="@Model.Amount">Copy</button>
+                Amount：@if (Model.IsCustomAmount)
+                {
+                    <span class="text-danger">
+                        @if (Model.MinCustomAmount.HasValue || Model.MaxCustomAmount.HasValue)
+                        {
+                            if (Model.MinCustomAmount.HasValue && Model.MaxCustomAmount.HasValue)
+                            {
+                                <text>Any amount is supported, but the payment amount cannot be less than @Model.MinCustomAmount @Model.Currency.ToCurrency(chain) or exceed @Model.MaxCustomAmount @Model.Currency.ToCurrency(chain)</text>
+                            }
+                            else if (Model.MinCustomAmount.HasValue)
+                            {
+                                <text>Any amount is supported, but the minimum payment is @Model.MinCustomAmount </text> @Model.Currency.ToCurrency(chain)
+                            }
+                            else
+                            {
+                                <text>Any amount is supported, but the maximum payment is @Model.MaxCustomAmount </text> @Model.Currency.ToCurrency(chain)
+                            }
+                        }
+                        else
+                        {
+                            <text>Any amount is supported </text> @Model.Currency.ToCurrency(chain)
+                        }
+                    </span>
+                }
+                else
+                {
+                    <span class="text-danger">@Model.Amount @Model.Currency.ToCurrency(chain)</span><button class="btn btn-primary btn-sm ms-2" data-clipboard-text="@Model.Amount">Copy</button>
+                }
             </div>
             <div class="mb-2">
                 Order No：<span class="text-danger">@Model.OutOrderId</span>
             </div>
             <div class="mb-2">
-                Expiration：<span class="text-danger">@ExpireTime.ToString("yyyy-MM-dd HH:mm:ss \"GMT\"zzz")</span>
+                Expiration：<span class="text-danger">@ExpireTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")</span>
             </div>
             <div class="mt-4 text-start">
                 <div>You can buy blockchain currency at</div>
-                <div>1. Buy <span class="text-danger">@Model.Currency.ToCurrency(chain)</span> on <a href="https://www.okx.com/buy-@Model.Currency.ToCurrency(chain)/UDS" target="_blank">OKX</a></div>
-                <div>2. Buy <span class="text-danger">@Model.Currency.ToCurrency(chain)</span> on<a href="https://p2p.binance.com/zh-CN/express/buy/@Model.Currency.ToCurrency(chain)/USD" target="_blank">Binance</a></div>
+                <div>1. Buy <span class="text-danger">@Model.Currency.ToCurrency(chain)</span> on <a href="https://www.okx.com/buy-crypto#sourceBase=@Model.Currency.ToCurrency(chain)" target="_blank">OKX</a></div>
+                <div>2. Buy <span class="text-danger">@Model.Currency.ToCurrency(chain)</span> on <a href="https://p2p.binance.com/express/buy/@Model.Currency.ToCurrency(chain)" target="_blank">Binance</a></div>
             </div>
         </div>
     </div>
@@ -111,19 +146,20 @@ else
                 $.get("/Check/@(Model?.Id)")
                     .then(x => {
                         if (x === 'Pending') {
-                            console.log('待支付')
+                            console.log('Pending')
                         } else if (x === 'Expired') {
                             clearInterval(Time)
-                            console.log('订单过期')
+                            console.log('Order expired')
                             location.reload();
                         } else if (x === 'Paid') {
                             clearInterval(Time)
-                            console.log('已支付')
+                            console.log('Paid')
                             setTimeout(() => {
                                 if (RedirectUrl) {
                                     location = RedirectUrl
                                 } else {
                                     alert("Paid")
+                                    location.reload();
                                 }
                             }, 0)
                         }

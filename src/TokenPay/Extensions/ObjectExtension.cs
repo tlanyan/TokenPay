@@ -24,14 +24,20 @@ namespace TokenPay.Extensions
                 { nameof(order.ToAddress), order.ToAddress },
                 { nameof(order.Status), (int)order.Status },
                 { nameof(order.PassThroughInfo), order.PassThroughInfo },
+                { nameof(order.IsCustomAmount), order.IsCustomAmount },
+                { nameof(order.MinCustomAmount), order.MinCustomAmount },
+                { nameof(order.MaxCustomAmount), order.MaxCustomAmount },
                 { "BaseCurrency", BaseCurrency },
                 { "BlockChainName", order.Currency.ToBlockchainEnglishName(EVMChains) },
                 { "CurrencyName", order.Currency.ToCurrency(EVMChains) },
+                { nameof(order.PayAmount), order.PayAmount?.ToString() },
+                { nameof(order.IsDynamicAmount), order.IsDynamicAmount ? 1 : 0 }
             };
+            //此处从回调中移除为Null的字段
             var nullKey = new List<string>();
             foreach (var item in dic)
             {
-                if (item.Value == null)
+                if (item.Value == null || item.Value is string s && string.IsNullOrEmpty(s))
                     nullKey.Add(item.Key);
             }
             foreach (var item in nullKey)

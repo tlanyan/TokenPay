@@ -29,7 +29,13 @@ namespace TokenPay.Models
         [Display(Name = "币种")]
         [Required(ErrorMessage = "{0}为必传参数")]
         //[(ErrorMessage = "{1}不是有效的{0}")]
-        public string Currency { get; set; }
+        public required string Currency { get; set; }
+        [Display(Name = "是否允许动态金额")]
+        public bool? IsCustomAmount { get; set; }
+        [Display(Name = "动态金额下限制最小金额")]
+        public decimal? MinCustomAmount { get; set; }
+        [Display(Name = "动态金额下限制最大金额")]
+        public decimal? MaxCustomAmount { get; set; }
         /// <summary>
         /// 在回调通知或订单信息中原样返回
         /// </summary>

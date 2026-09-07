@@ -1,24 +1,33 @@
-
-using Exceptionless;
+using Flurl.Http;
+using Flurl.Http.Newtonsoft;
 using FreeSql;
-using FreeSql.DataAnnotations;
-using Microsoft.AspNetCore.Localization;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Razor;
-using Microsoft.AspNetCore.Server.Kestrel.Core;
-using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 using Serilog.Events;
-using System.Data.Common;
+using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Reflection;
+using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
+using System.Threading.RateLimiting;
 using TokenPay.BgServices;
+using TokenPay.Controllers;
 using TokenPay.Domains;
 using TokenPay.Helper;
 using TokenPay.Models.EthModel;
+
+if (args.Length == 2 && args[0] == "--hash-admin-password")
+{
+    Console.WriteLine(new PasswordHasher<object>().HashPassword(new object(), args[1]));
+    return;
+}
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
@@ -26,7 +35,12 @@ Log.Logger = new LoggerConfiguration()
     .WriteTo.File("logs/log-.log", rollingInterval: RollingInterval.Day)
     .WriteTo.Console()
     .CreateBootstrapLogger();
-Log.Information("-------------{value}-------------", "System Info Begin");
+Assembly assembly = Assembly.GetExecutingAssembly();
+var fileVersionInfo = FileVersionInfo.GetVersionInfo(assembly.Location);
+Log.Information("-------------{value}-------------", "TokenPay Info");
+Log.Information("File Version: {value}", fileVersionInfo.FileVersion);
+Log.Information("Product Version: {value}", fileVersionInfo.ProductVersion);
+Log.Information("-------------{value}-------------", "System Info");
 Log.Information("Platform: {value}", (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "Linux" :
                     RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "OSX" :
                     RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : "Unknown"));
@@ -36,16 +50,56 @@ Log.Information("ProcessArchitecture: {value}", RuntimeInformation.ProcessArchit
 Log.Information("X64: {value}", (Environment.Is64BitOperatingSystem ? "Yes" : "No"));
 Log.Information("CPU CORE: {value}", Environment.ProcessorCount);
 Log.Information("HostName: {value}", Environment.MachineName);
-Log.Information("Version: {value}", Environment.OSVersion);
-Log.Information("-------------{value}-------------", "System Info End");
+Log.Information("OSVersion: {value}", Environment.OSVersion);
+Log.Information("IsServerGC: {value}", GCSettings.IsServerGC);
+Log.Information("IsConcurrent: {value}", GC.GetGCMemoryInfo().Concurrent);
+Log.Information("LatencyMode: {value}", GCSettings.LatencyMode);
 
 var builder = WebApplication.CreateBuilder(args);
 var Services = builder.Services;
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+    options.ForwardLimit = 1;
+
+    options.KnownProxies.Add(IPAddress.Loopback);
+    options.KnownProxies.Add(IPAddress.IPv6Loopback);
+    options.KnownNetworks.Add(new Microsoft.AspNetCore.HttpOverrides.IPNetwork(IPAddress.Parse("172.16.0.0"), 12));
+});
 var Configuration = builder.Configuration;
-QueryTronAction.configuration = Configuration;
 Configuration.AddJsonFile("EVMChains.json", optional: true, reloadOnChange: true);
 if (!builder.Environment.IsProduction())
     Configuration.AddJsonFile($"EVMChains.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true);
+
+QueryTronAction.configuration = Configuration;
+
+var EVMChains = Configuration.GetSection("EVMChains").Get<List<EVMChain>>() ?? new List<EVMChain>();
+Services.AddSingleton(EVMChains);
+
+var UseDynamicAddress = Configuration.GetValue("UseDynamicAddress", true);
+var UseDynamicAddressAmountMove = Configuration.GetValue("DynamicAddressConfig:AmountMove", false);
+var CollectionEnable = Configuration.GetValue("Collection:Enable", false);
+Log.Information("-------------{value}-------------", "AppSettings");
+var currencies = HomeController.GetActiveCurrency(EVMChains);
+Log.Information("支持的币种: {value}", currencies);
+Log.Information("币种小数点位数: ");
+foreach (var currency in currencies)
+{
+    Log.Information("\t{currency}={value}", currency, HomeController.GetDecimals(currency, Configuration));
+}
+Log.Information("启用动态地址: {value}", UseDynamicAddress);
+Log.Information("启用动态金额: {value}", UseDynamicAddressAmountMove);
+Log.Information("动态金额生效状态: {value}", UseDynamicAddress && UseDynamicAddressAmountMove);
+Log.Information("启用波场自动归集: {value}", CollectionEnable);
+if (CollectionEnable)
+{
+    var CollectionUseEnergy = Configuration.GetValue("Collection:UseEnergy", true);
+    var CollectionForceCheckAllAddress = Configuration.GetValue("Collection:ForceCheckAllAddress", false);
+    Log.Information("启用租用能量: {value}", CollectionUseEnergy);
+    Log.Information("启用强制检查所有地址余额: {value}", CollectionForceCheckAllAddress);
+}
+Log.Information("-------------{value}-------------", "End");
 
 builder.Host.UseSerilog((context, services, configuration) => configuration
                     .ReadFrom.Configuration(context.Configuration)
@@ -53,38 +107,59 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
                     .Enrich.FromLogContext()
                     .WriteTo.File("logs/log-.log", rollingInterval: RollingInterval.Day)
                     .WriteTo.Console()
-                    .WriteTo.Exceptionless(b => b.AddTags("Serilog"))
                     );
-builder.Services.AddControllersWithViews()
+Services.Configure<RazorViewEngineOptions>((options) =>
+ {
+     options.ViewLocationExpanders.Add(new ThemeViewLocationExpander(Configuration, builder.Environment));
+ });
+var mvcBuilder = Services.AddControllersWithViews()
     .AddViewLocalization(LanguageViewLocationExpanderFormat.Suffix)
     .AddJsonOptions(o =>
     {
         o.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
-var EVMChains = Configuration.GetSection("EVMChains").Get<List<EVMChain>>() ?? new List<EVMChain>();
-Services.AddSingleton(EVMChains);
+var externalViewsPath = Path.Combine(builder.Environment.ContentRootPath, "Views");
+if (Directory.Exists(externalViewsPath))
+{
+    mvcBuilder.AddRazorRuntimeCompilation();
+    Log.Information("检测到外置 Views 目录，已启用 Razor 运行时编译");
+}
+
+Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "TokenPay.Admin";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Strict;
+        options.Cookie.SecurePolicy = Configuration.GetValue("Admin:RequireHttps", true)
+            ? CookieSecurePolicy.Always
+            : CookieSecurePolicy.SameAsRequest;
+        options.LoginPath = "/admin/login";
+        options.AccessDeniedPath = "/admin/login";
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(Configuration.GetValue("Admin:SessionMinutes", 30));
+        options.SlidingExpiration = true;
+    });
+Services.AddRateLimiter(options =>
+{
+    options.AddPolicy("admin-login", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 5,
+            Window = TimeSpan.FromMinutes(10),
+            QueueLimit = 0
+        }));
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+});
 
 var connectionString = Configuration.GetConnectionString("DB");
-IFreeSql fsql;
-if (RuntimeInformation.OSArchitecture == Architecture.Arm64)
-{
-    Microsoft.Data.Sqlite.SqliteConnection _database = new Microsoft.Data.Sqlite.SqliteConnection(connectionString);
-    fsql = new FreeSqlBuilder()
-        .UseConnectionFactory(FreeSql.DataType.Sqlite, () => _database, typeof(FreeSql.Sqlite.SqliteProvider<>))
+IFreeSql fsql = new FreeSqlBuilder()
+        .UseConnectionString(DataType.Sqlite, connectionString)
         .UseAutoSyncStructure(true) //自动同步实体结构
-        .UseNoneCommandParameter(true)
+        .UseAdoConnectionPool(true)
+        //.UseNoneCommandParameter(true)
         .Build();
-}
-else
-{
-
-    fsql = new FreeSqlBuilder()
-        .UseConnectionString(FreeSql.DataType.Sqlite, connectionString)
-        .UseAutoSyncStructure(true) //自动同步实体结构
-        .UseNoneCommandParameter(true)
-        .Build();
-}
 
 Services.AddSingleton(fsql);
 Services.AddScoped<UnitOfWorkManager>();
@@ -98,47 +173,68 @@ Services.AddHostedService<OrderCheckTRXService>();
 Services.AddHostedService<OrderCheckEVMBaseService>();
 Services.AddHostedService<OrderCheckEVMERC20Service>();
 Services.AddHostedService<CollectionTRONService>();
-Services.AddExceptionless(Configuration);
+Services.AddHostedService<TelegramInitializationService>();
 Services.AddHttpContextAccessor();
-Services.AddEndpointsApiExplorer();
-Services.AddSwaggerGen(c =>
+if (builder.Environment.IsDevelopment())
 {
-    c.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, $"{Assembly.GetExecutingAssembly().GetName().Name}.xml"));
-});
+    Services.AddEndpointsApiExplorer();
+    Services.AddSwaggerGen(c =>
+    {
+        c.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, $"{Assembly.GetExecutingAssembly().GetName().Name}.xml"));
+    });
+}
 Services.Configure<RequestLocalizationOptions>(options =>
 {
     var supportedCultures = new List<CultureInfo>
-            {
-                new CultureInfo("en"),
-                new CultureInfo("zh"),
-                new CultureInfo("ru")
-            };
+    {
+        new("en"),     // English / 英语
+        new("zh"),     // Chinese / 中文
+        new("hi"),     // Hindi / 印地语
+        new("ur"),     // Urdu / 乌尔都语
+        new("vi"),     // Vietnamese / 越南语
+        new("pt"),     // Portuguese / 葡萄牙语
+        new("es"),     // Spanish / 西班牙语
+        new("ru"),     // Russian / 俄语
+        new("id"),     // Indonesian / 印度尼西亚语
+        new("uk"),     // Ukrainian / 乌克兰语
+        new("tl"),     // Filipino (Tagalog) / 菲律宾语（他加禄语）
+        new("tr"),     // Turkish / 土耳其语
+        new("ko"),     // Korean / 韩语
+        new("th"),     // Thai / 泰语
+        new("ja"),     // Japanese / 日语
+        new("bn"),     // Bengali / 孟加拉语
+        new("ar"),     // Arabic / 阿拉伯语
+        new("de"),     // German / 德语
+        new("fr"),     // French / 法语
+        new("it"),     // Italian / 意大利语
+        new("nl"),     // Dutch / 荷兰语
+        new("pl"),     // Polish / 波兰语
+        new("cs"),     // Czech / 捷克语
+        new("ro"),     // Romanian / 罗马尼亚语
+    };
 
-    options.SetDefaultCulture(supportedCultures[0].Name);
+    options.SetDefaultCulture("en");
     options.SupportedCultures = supportedCultures;
     options.SupportedUICultures = supportedCultures;
 });
-Services.AddSingleton(s =>
-{
-    var bot = new TelegramBot(Configuration);
-    try
-    {
-        var me = bot.GetMeAsync().GetAwaiter().GetResult();
-    }
-    catch (Exception e)
-    {
-        Log.Logger.Error(e, "机器人连接失败！");
-        throw;
-    }
-    return bot;
-});
+Services.AddSingleton(new TelegramBot(Configuration));
 // 订单广播 
 var channel = Channel.CreateUnbounded<TokenOrders>();
 Services.AddSingleton(channel);
 
+var WebProxy = Configuration.GetValue<string>("WebProxy");
+FlurlHttp.Clients.UseNewtonsoft();
+if (!string.IsNullOrEmpty(WebProxy))
+{
+    FlurlHttp.Clients.WithDefaults(c =>
+    {
+        c.AddMiddleware(() => new ProxyHttpClientFactory(WebProxy));
+    });
+}
+
 
 var app = builder.Build();
-
+app.UseForwardedHeaders();
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/error");
@@ -150,14 +246,31 @@ else
     app.UseSwaggerUI();
 }
 app.UseStaticFiles();
-app.UseExceptionless();
 app.UseRouting();
 
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/admin"))
+    {
+        if (!Configuration.GetValue("Admin:Enabled", false))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        context.Response.Headers.XFrameOptions = "DENY";
+        context.Response.Headers.XContentTypeOptions = "nosniff";
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+    }
+    await next();
+});
+app.UseRateLimiter();
+app.UseAuthentication();
 app.UseAuthorization();
 app.UseRequestLocalization();
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}");
+app.MapGet("/ip", (HttpContext context) => Results.Ok(new { RemoteIp = context.Connection.RemoteIpAddress?.ToString() }));
 try
 {
     Log.Information("Starting web host");

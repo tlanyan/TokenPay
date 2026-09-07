@@ -22,12 +22,12 @@ namespace TokenPay.Controllers
         private readonly IBaseRepository<TokenOrders> _repository;
         private readonly IBaseRepository<TokenRate> _rateRepository;
         private readonly IBaseRepository<Tokens> _tokenRepository;
-        private readonly List<EVMChain> _chain;
+        private readonly List<EVMChain> _chains;
         private readonly IHostEnvironment _env;
         private readonly ILogger<HomeController> _logger;
         private readonly IConfiguration _configuration;
-        private FiatCurrency BaseCurrency => Enum.Parse<FiatCurrency>(_configuration.GetValue("BaseCurrency", "CNY"));
-        private int GetDecimals(string currency)
+        private FiatCurrency BaseCurrency => Enum.Parse<FiatCurrency>(_configuration.GetValue("BaseCurrency", "CNY")!);
+        public static int GetDecimals(string currency, IConfiguration _configuration)
         {
             var decimals = currency switch
             {
@@ -41,7 +41,7 @@ namespace TokenPay.Controllers
         private List<string> GetErc20Name()
         {
             var list = new List<string>();
-            foreach (var item in _chain)
+            foreach (var item in _chains)
             {
                 list.Add(item.ERC20Name);
             }
@@ -67,13 +67,13 @@ namespace TokenPay.Controllers
             };
             return value;
         }
-        private List<string> GetActiveCurrency()
+        public static List<string> GetActiveCurrency(List<EVMChain> chains)
         {
             var list = new List<string>()
             {
                 "TRX","USDT_TRC20"
             };
-            foreach (var chain in _chain)
+            foreach (var chain in chains)
             {
                 if (chain == null || !chain.Enable || chain.ERC20 == null) continue;
                 list.Add($"EVM_{chain.ChainNameEN}_{chain.BaseCoin}");
@@ -95,7 +95,7 @@ namespace TokenPay.Controllers
             this._repository = repository;
             this._rateRepository = rateRepository;
             this._tokenRepository = tokenRepository;
-            this._chain = chain;
+            this._chains = chain;
             this._env = env;
             this._logger = logger;
             this._configuration = configuration;
@@ -122,6 +122,39 @@ namespace TokenPay.Controllers
             ViewData["ExpireTime"] = order.CreateTime.AddSeconds(ExpireTime);
             return View(order);
         }
+        [HttpGet]
+        [ApiExplorerSettings(IgnoreApi = false)]
+        public async Task<IActionResult> Query(Guid Id, string Signature)
+        {
+            if (ShouldVerifySignature())
+            {
+                if (!VerifySignature(new
+                {
+                    Id,
+                    Signature
+                }))
+                {
+                    return Json(new ReturnData
+                    {
+                        Message = "签名验证失败！"
+                    });
+                }
+            }
+            var order = await _repository.Where(x => x.Id == Id).FirstAsync();
+            if (order == null)
+            {
+                return Json(new ReturnData
+                {
+                    Message = "订单不存在！"
+                });
+            }
+            return Json(new ReturnData<object>
+            {
+                Success = true,
+                Message = "订单信息获取成功！",
+                Data = order.ToDic(_configuration),
+            });
+        }
         [Route("/{action}/{id}")]
         public async Task<IActionResult> Check(Guid Id)
         {
@@ -132,7 +165,7 @@ namespace TokenPay.Controllers
             }
             return Content(order.Status.ToString());
         }
-        private bool VerifySignature(CreateOrderViewModel model)
+        private bool VerifySignature(object model)
         {
             if (model == null) return false;
             var dic = new SortedDictionary<string, string?>();
@@ -149,10 +182,7 @@ namespace TokenPay.Controllers
             {
                 dic.Remove("Signature");
                 var SignatureStr = string.Join("&", dic.Select(x => $"{x.Key}={x.Value}"));
-                var ApiToken = _configuration.GetValue<string>("ApiToken");
-                SignatureStr += ApiToken;
-                var md5 = SignatureStr.ToMD5();
-                return Signature == md5;
+                return SignatureHelper.Verify(SignatureStr, Signature, _configuration);
             }
             return false;
         }
@@ -177,7 +207,7 @@ namespace TokenPay.Controllers
                     Message = messages
                 });
             }
-            if (_env.IsProduction())
+            if (ShouldVerifySignature())
             {
                 if (!VerifySignature(model))
                 {
@@ -187,19 +217,38 @@ namespace TokenPay.Controllers
                     });
                 }
             }
-            if (!GetActiveCurrency().Contains(model.Currency))
+            if (!GetActiveCurrency(_chains).Contains(model.Currency))
             {
                 return Json(new ReturnData
                 {
-                    Message = $"不支持的币种【{model.Currency}】！\n当前支持的币种参数有：{string.Join(", ", GetActiveCurrency())}"
+                    Message = $"不支持的币种【{model.Currency}】！\n当前支持的币种参数有：{string.Join(", ", GetActiveCurrency(_chains))}"
                 });
             }
-            if (model.ActualAmount <= 0)
+            var IsCustomAmount = model.IsCustomAmount ?? false;
+            if (model.ActualAmount <= 0 && !IsCustomAmount)
             {
                 return Json(new ReturnData
                 {
                     Message = "金额有误！"
                 });
+            }
+            var UseDynamicAddress = _configuration.GetValue("UseDynamicAddress", true);
+            if (!UseDynamicAddress && IsCustomAmount)
+            {
+                return Json(new ReturnData
+                {
+                    Message = "仅使用动态地址时可使用此参数！"
+                });
+            }
+            else
+            {
+                if (IsCustomAmount && model.ActualAmount != 0)
+                {
+                    return Json(new ReturnData
+                    {
+                        Message = "使用动态收款金额时，实付金额必须为0！"
+                    });
+                }
             }
             //订单号已存在
             var hasOrder = await _repository.Where(x => x.OutOrderId == model.OutOrderId && x.Currency == model.Currency)
@@ -226,7 +275,6 @@ namespace TokenPay.Controllers
                 RedirectUrl = model.RedirectUrl,
                 PassThroughInfo = model.PassThroughInfo,
             };
-            var UseDynamicAddress = _configuration.GetValue("UseDynamicAddress", true);
             try
             {
                 if (UseDynamicAddress)
@@ -234,6 +282,12 @@ namespace TokenPay.Controllers
                     var (Address, Amount) = await GetUseTokenDynamicAdress(model);
                     order.ToAddress = Address;
                     order.Amount = Amount;
+                    if (IsCustomAmount)
+                    {
+                        order.IsCustomAmount = IsCustomAmount;
+                        order.MinCustomAmount = model.MinCustomAmount;
+                        order.MaxCustomAmount = model.MaxCustomAmount;
+                    }
                 }
                 else
                 {
@@ -249,11 +303,11 @@ namespace TokenPay.Controllers
                     Message = e.Message
                 });
             }
-            if (order.Amount <= 0)
+            if (order.Amount <= 0 && !order.IsCustomAmount)
             {
                 return Json(new ReturnData
                 {
-                    Message = "此订单金额过低！"
+                    Message = "此订单金额有误，请检查币种汇率是否正确！"
                 });
             }
             await _repository.InsertAsync(order);
@@ -266,7 +320,7 @@ namespace TokenPay.Controllers
             });
         }
 
-        public SortedDictionary<string, object?> ToPayDic(TokenOrders order)
+        private SortedDictionary<string, object?> ToPayDic(TokenOrders order)
         {
             var BaseCurrency = _configuration.GetValue<string>("BaseCurrency", "CNY");
             var ExpireTime = _configuration.GetValue("ExpireTime", 10 * 60);
@@ -279,9 +333,12 @@ namespace TokenPay.Controllers
                 { nameof(order.ActualAmount), order.ActualAmount.ToString() },
                 { nameof(order.ToAddress), order.ToAddress },
                 { nameof(order.PassThroughInfo), order.PassThroughInfo },
+                { nameof(order.IsCustomAmount), order.IsCustomAmount },
+                { nameof(order.MinCustomAmount), order.MinCustomAmount },
+                { nameof(order.MaxCustomAmount), order.MaxCustomAmount },
                 { "BaseCurrency", BaseCurrency },
-                { "BlockChainName", order.Currency.ToBlockchainEnglishName(_chain) },
-                { "CurrencyName", order.Currency.ToCurrency(_chain) },
+                { "BlockChainName", order.Currency.ToBlockchainEnglishName(_chains) },
+                { "CurrencyName", order.Currency.ToCurrency(_chains) },
                 { "ExpireTime", order.CreateTime.AddSeconds(ExpireTime).ToString("yyyy-MM-dd HH:mm:ss")},
                 { "QrCodeBase64", "data:image/png;base64," + Convert.ToBase64String(CreateQrCode(order.ToAddress))},
                 { "QrCodeLink", Host + Url.Action(nameof(GetQrCode), new { Id = order.Id })},
@@ -295,6 +352,7 @@ namespace TokenPay.Controllers
         /// <returns></returns>
         public async Task<IActionResult> GetQrCode(Guid Id, int Size = 300)
         {
+            if (Size is < 100 or > 1000) return BadRequest("二维码尺寸必须在 100 到 1000 之间。");
             var order = await _repository.Where(x => x.Id == Id).FirstAsync();
             if (order == null)
             {
@@ -325,14 +383,14 @@ namespace TokenPay.Controllers
             var rate = GetRate(model.Currency);
             if (rate <= 0)
             {
-                var Currency = model.Currency.ToCurrency(_chain);
+                var Currency = model.Currency.ToCurrency(_chains);
                 rate = await _rateRepository.Where(x => x.Currency == Currency && x.FiatCurrency == BaseCurrency).FirstAsync(x => x.Rate);
             }
             if (rate <= 0)
             {
                 throw new TokenPayException("汇率有误！");
             }
-            var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency));
+            var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency, _configuration)); //因为每个用户一个独立支付地址，所以此处金额计算逻辑与静态地址不同
             return (UseTokenAdress, Amount);
         }
         /// <summary>
@@ -415,14 +473,14 @@ namespace TokenPay.Controllers
             var rate = GetRate(model.Currency);
             if (rate <= 0)
             {
-                var Currency = model.Currency.ToCurrency(_chain);
+                var Currency = model.Currency.ToCurrency(_chains);
                 rate = await _rateRepository.Where(x => x.Currency == Currency && x.FiatCurrency == BaseCurrency).FirstAsync(x => x.Rate);
             }
             if (rate <= 0)
             {
                 throw new TokenPayException("汇率有误！");
             }
-            var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency));
+            var Amount = (model.ActualAmount / rate).ToRound(GetDecimals(model.Currency, _configuration));
             //随机排序所有收款地址
             CurrentAdress = CurrentAdress.OrderBy(x => Guid.NewGuid()).ToArray();
             var UseTokenAdress = string.Empty;
@@ -445,8 +503,8 @@ namespace TokenPay.Controllers
             //所有地址都存在此金额
             if (string.IsNullOrEmpty(UseTokenAdress))
             {
-                var decimals = GetDecimals(model.Currency);
-                var maxLoop = Math.Pow(10, decimals);
+                var decimals = GetDecimals(model.Currency, _configuration);//根据小数位数计算递增次数，2位小数递增100次，三位小数递增1000次
+                var maxLoop = Math.Max(5, Math.Pow(10, decimals));//可能会存在0位小数的情况，限制最少递增5次
                 var AddAmount = Convert.ToDecimal(1 / maxLoop);//初始递增量
                 for (int i = 0; i < maxLoop; i++)//最多递增N次，根据精度控制
                 {
@@ -460,7 +518,7 @@ namespace TokenPay.Controllers
                             .Where(x => x.Currency == model.Currency)//虚拟币币种
                             .Where(x => x.Amount == currentAmount) //实际支付的虚拟币金额
                             .Where(x => x.Status == OrderStatus.Pending);
-                        var has = await query//代支付
+                        var has = await query//待支付
                             .AnyAsync();
                         if (!has)
                         {
@@ -482,20 +540,8 @@ namespace TokenPay.Controllers
             return (UseTokenAdress, Amount);
         }
 
-        [Route("/{action}/{address}")]
-        public async Task<IActionResult> CheckAddress(string address)
-        {
-            var item = await _tokenRepository.Where(x => x.Address == address && x.Currency == TokenCurrency.TRX).FirstAsync();
-            if (item == null)
-            {
-                _logger.LogWarning("检查的地址[{address}]不存在！", address);
-                return Content("ok");
-            }
-            item.Value = await QueryTronAction.GetTRXAsync(address);
-            item.USDT = await QueryTronAction.GetUsdtAmountAsync(address);
-            await _tokenRepository.UpdateAsync(item);
-            return Content("ok");
-        }
+        private bool ShouldVerifySignature() =>
+            _env.IsProduction() || !_configuration.GetValue("Signature:AllowInsecureDevelopment", false);
         [Route("/error-development")]
         public IActionResult HandleErrorDevelopment([FromServices] IHostEnvironment hostEnvironment)
         {

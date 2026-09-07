@@ -1,5 +1,7 @@
 namespace TokenPay.Models.EthModel
 {
+
+#pragma warning disable CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
     public class EVMChain
     {
         /// <summary>
@@ -39,6 +41,10 @@ namespace TokenPay.Models.EthModel
         /// </summary>
         public string ApiKey { get; set; }
         /// <summary>
+        /// 区块链id
+        /// </summary>
+        public int ChainId { get; set; }
+        /// <summary>
         /// ERC20Name
         /// </summary>
         public string ERC20Name { get; set; }
@@ -58,4 +64,5 @@ namespace TokenPay.Models.EthModel
         /// </summary>
         public string ContractAddress { get; set; }
     }
+#pragma warning restore CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
 }

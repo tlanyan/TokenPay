@@ -11,30 +11,29 @@ namespace TokenPay.BgServices
 {
     public class OrderCheckTRXService : BaseScheduledService
     {
-        private readonly ILogger<OrderCheckTRXService> _logger;
         private readonly IConfiguration _configuration;
         private readonly IHostEnvironment _env;
         private readonly Channel<TokenOrders> _channel;
-        private readonly IServiceProvider _serviceProvider;
+        private readonly IFreeSql freeSql;
+        private bool UseDynamicAddress => _configuration.GetValue("UseDynamicAddress", true);
+        private bool UseDynamicAddressAmountMove => _configuration.GetValue("DynamicAddressConfig:AmountMove", false);
 
         public OrderCheckTRXService(ILogger<OrderCheckTRXService> logger,
             IConfiguration configuration,
             IHostEnvironment env,
             Channel<TokenOrders> channel,
-            IServiceProvider serviceProvider) : base("TRX订单检测", TimeSpan.FromSeconds(3), logger)
+            IFreeSql freeSql) : base("TRX订单检测", TimeSpan.FromSeconds(3), logger)
         {
-            _logger = logger;
             this._configuration = configuration;
             this._env = env;
             this._channel = channel;
-            _serviceProvider = serviceProvider;
+            this.freeSql = freeSql;
         }
 
-        protected override async Task ExecuteAsync()
+        protected override async Task ExecuteAsync(DateTime RunTime, CancellationToken stoppingToken)
         {
-            using IServiceScope scope = _serviceProvider.CreateScope();
-            var _repository = scope.ServiceProvider.GetRequiredService<IBaseRepository<TokenOrders>>();
-            var _TokensRepository = scope.ServiceProvider.GetRequiredService<IBaseRepository<Tokens>>();
+            var _repository = freeSql.GetRepository<TokenOrders>();
+            var _TokensRepository = freeSql.GetRepository<Tokens>();
 
             var Address = await _repository
                 .Where(x => x.Status == OrderStatus.Pending)
@@ -74,9 +73,9 @@ namespace TokenPay.BgServices
                     .SetQueryParams(query)
                     .WithTimeout(15);
                 if (_env.IsProduction())
-                    req = req.WithHeader("TRON-PRO-API-KEY", _configuration.GetValue("TRON-PRO-API-KEY", ""));
+                    req = req.WithHeader("TRON-PRO-API-KEY", _configuration.GetValue<string>("TRON-PRO-API-KEY"));
                 var result = await req
-                    .GetJsonAsync<BaseResponse<TrxTransaction>>();
+                    .GetJsonAsync<BaseResponse<TrxTransaction>>(cancellationToken: stoppingToken);
 
                 if (result.Success && result.Data?.Count > 0)
                 {
@@ -106,23 +105,60 @@ namespace TokenPay.BgServices
                         var order = orders.Where(x => x.Amount == raw.RealAmount && x.ToAddress == raw.ToAddressBase58 && x.CreateTime < item.BlockTimestamp.ToDateTime())
                             .OrderByDescending(x => x.CreateTime)//优先付最后一单
                             .FirstOrDefault();
+                    recheck:
                         if (order != null)
                         {
                             order.FromAddress = raw.OwnerAddress.HexToeBase58();
                             order.BlockTransactionId = item.TxID;
                             order.Status = OrderStatus.Paid;
-                            order.PayTime = DateTime.Now;
+                            order.PayTime = item.BlockTimestamp.ToDateTime();
+                            order.PayAmount = raw.RealAmount;
                             await _repository.UpdateAsync(order);
                             orders.Remove(order);
-                            await SendAdminMessage(order);
+                            await SendAdminMessage(order, stoppingToken);
+                        }
+                        else
+                        {
+                            if (UseDynamicAddress && UseDynamicAddressAmountMove)
+                            {
+                                //允许非准确金额支付
+                                var Move = _configuration.GetSection("DynamicAddressConfig:TRX").Get<decimal[]>() ?? [];
+                                if (Move.Length == 2)
+                                {
+                                    var Down = Move[0]; //上浮金额
+                                    var Up = Move[1]; //下浮金额
+                                    order = orders.Where(x => raw.RealAmount >= x.Amount - Down && raw.RealAmount <= x.Amount + Up)
+                                        .Where(x => x.ToAddress == raw.ToAddressBase58 && x.CreateTime < item.BlockTimestamp.ToDateTime())
+                                        .OrderByDescending(x => x.CreateTime)//优先付最后一单
+                                        .FirstOrDefault();
+                                    if (order != null)
+                                    {
+                                        order.IsDynamicAmount = true;
+                                        goto recheck;
+                                    }
+                                }
+                            }
+                        }
+                        if (order == null)
+                        {
+                            //已启用动态金额的订单
+                            order = orders.Where(x => x.IsCustomAmount && x.ToAddress == raw.ToAddressBase58 && x.CreateTime < item.BlockTimestamp.ToDateTime())
+                                .Where(x => x.MinCustomAmount == null || x.MinCustomAmount <= raw.RealAmount)
+                                .Where(x => x.MaxCustomAmount == null || x.MaxCustomAmount >= raw.RealAmount)
+                                .OrderByDescending(x => x.CreateTime)//优先付最后一单
+                                .FirstOrDefault();
+                            if (order != null)
+                            {
+                                goto recheck;
+                            }
                         }
                     }
                 }
             }
         }
-        private async Task SendAdminMessage(TokenOrders order)
+        private async Task SendAdminMessage(TokenOrders order, CancellationToken stoppingToken)
         {
-            await _channel.Writer.WriteAsync(order);
+            await _channel.Writer.WriteAsync(order, stoppingToken);
         }
     }
 }
